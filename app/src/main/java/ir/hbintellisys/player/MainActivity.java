@@ -7,7 +7,6 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -20,7 +19,6 @@ import android.webkit.WebViewClient;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,12 +31,6 @@ public class MainActivity extends Activity {
     private static final long HEALTH_INTERVAL_MS = 15_000L;
     private static final long RETRY_DELAY_MS = 10_000L;
 
-    // The Setareh/AFTAB dashboard is visually much cleaner when rendered on a
-    // slightly wider virtual canvas and then fitted to the physical 5:4 panel.
-    // This prevents the three dashboard columns from becoming cramped while
-    // still filling the complete 1280x1024 display without cropping.
-    private static final int SIGNAGE_VIRTUAL_WIDTH_CSS = 1440;
-
     private WebView webView;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -48,8 +40,7 @@ public class MainActivity extends Activity {
     private String siteCode;
 
     private final Runnable healthLoop = new Runnable() {
-        @Override
-        public void run() {
+        @Override public void run() {
             probeServer();
             handler.postDelayed(this, HEALTH_INTERVAL_MS);
         }
@@ -59,11 +50,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        getWindow().addFlags(
-                WindowManager.LayoutParams.FLAG_FULLSCREEN |
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        );
-
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         applyImmersiveMode();
         loadConfiguration(getIntent());
         BootReceiver.requestTailscaleConnect(this);
@@ -85,15 +72,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    @Override
-    protected void onResume() {
+    @Override protected void onResume() {
         super.onResume();
         applyImmersiveMode();
         BootReceiver.requestTailscaleConnect(this);
     }
 
-    @Override
-    protected void onDestroy() {
+    @Override protected void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         executor.shutdownNow();
         if (webView != null) {
@@ -107,18 +92,12 @@ public class MainActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String savedUrl = prefs.getString(KEY_URL, BuildConfig.DEFAULT_DISPLAY_URL);
         String savedSite = prefs.getString(KEY_SITE, BuildConfig.DEFAULT_SITE_CODE);
-
         if (intent != null) {
             String suppliedUrl = intent.getStringExtra(KEY_URL);
             String suppliedSite = intent.getStringExtra(KEY_SITE);
-            if (suppliedUrl != null && (suppliedUrl.startsWith("http://") || suppliedUrl.startsWith("https://"))) {
-                savedUrl = suppliedUrl.trim();
-            }
-            if (suppliedSite != null && !suppliedSite.trim().isEmpty()) {
-                savedSite = suppliedSite.trim();
-            }
+            if (suppliedUrl != null && (suppliedUrl.startsWith("http://") || suppliedUrl.startsWith("https://"))) savedUrl = suppliedUrl.trim();
+            if (suppliedSite != null && !suppliedSite.trim().isEmpty()) savedSite = suppliedSite.trim();
         }
-
         displayUrl = savedUrl;
         siteCode = savedSite;
         prefs.edit().putString(KEY_URL, displayUrl).putString(KEY_SITE, siteCode).apply();
@@ -136,8 +115,12 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setLoadsImagesAutomatically(true);
+
+        // Let the dashboard use the WebView's real CSS viewport.  Do not inject a
+        // fake 1440px document width: on this 1280x1024 / 160dpi installation the
+        // WebView viewport is already the correct 1280 CSS pixels wide.
         settings.setUseWideViewPort(true);
-        settings.setLoadWithOverviewMode(true);
+        settings.setLoadWithOverviewMode(false);
         settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
@@ -146,25 +129,20 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
 
+        webView.setInitialScale(100);
         webView.setWebViewClient(new WebViewClient() {
-            @Override
-            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+            @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 Log.i(TAG, "Loading: " + url);
             }
 
-            @Override
-            public void onPageFinished(WebView view, String url) {
+            @Override public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
-                    offline = false;
-                    applySignageViewport(view);
-                }
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) offline = false;
                 applyImmersiveMode();
             }
 
-            @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (request != null && request.isForMainFrame()) {
                     Log.w(TAG, "Main page load failed: " + error);
@@ -175,46 +153,8 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void applySignageViewport(WebView view) {
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        float density = dm.density <= 0f ? 1f : dm.density;
-        float cssDeviceWidth = dm.widthPixels / density;
-        float scale = cssDeviceWidth / SIGNAGE_VIRTUAL_WIDTH_CSS;
-
-        // Keep a sane bound in case an unusual OEM reports bad metrics.
-        scale = Math.max(0.45f, Math.min(1.0f, scale));
-        final float finalScale = scale;
-
-        String js = String.format(Locale.US,
-                "(function(){" +
-                "var m=document.querySelector('meta[name=viewport]');" +
-                "if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}" +
-                "m.setAttribute('content','width=%d, initial-scale=%.4f, minimum-scale=%.4f, maximum-scale=%.4f, user-scalable=no');" +
-                "document.documentElement.style.minWidth='%dpx';" +
-                "document.documentElement.style.width='%dpx';" +
-                "document.documentElement.style.overflowX='hidden';" +
-                "document.body.style.minWidth='%dpx';" +
-                "document.body.style.width='%dpx';" +
-                "document.body.style.margin='0';" +
-                "void(document.body.offsetWidth);" +
-                "return {w:window.innerWidth,dw:document.documentElement.scrollWidth,scale:%.4f};" +
-                "})()",
-                SIGNAGE_VIRTUAL_WIDTH_CSS,
-                finalScale, finalScale, finalScale,
-                SIGNAGE_VIRTUAL_WIDTH_CSS,
-                SIGNAGE_VIRTUAL_WIDTH_CSS,
-                SIGNAGE_VIRTUAL_WIDTH_CSS,
-                SIGNAGE_VIRTUAL_WIDTH_CSS,
-                finalScale);
-
-        view.evaluateJavascript(js, result ->
-                Log.i(TAG, "Signage viewport applied: " + result));
-    }
-
     private void showOfflinePage() {
-        if (offline || webView == null) {
-            return;
-        }
+        if (offline || webView == null) return;
         offline = true;
         String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>" +
                 "<style>html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;font-family:sans-serif;}" +
@@ -232,9 +172,7 @@ public class MainActivity extends Activity {
     }
 
     private void probeServer() {
-        if (!probeRunning.compareAndSet(false, true)) {
-            return;
-        }
+        if (!probeRunning.compareAndSet(false, true)) return;
         final String urlToProbe = displayUrl;
         executor.execute(() -> {
             boolean reachable = false;
@@ -253,17 +191,12 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 Log.w(TAG, "Heartbeat failed: " + e.getMessage());
             } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
+                if (connection != null) connection.disconnect();
                 probeRunning.set(false);
             }
-
             final boolean serverReachable = reachable;
             handler.post(() -> {
-                if (isFinishing() || isDestroyed() || webView == null) {
-                    return;
-                }
+                if (isFinishing() || isDestroyed() || webView == null) return;
                 if (serverReachable) {
                     if (offline) {
                         offline = false;
@@ -284,7 +217,6 @@ public class MainActivity extends Activity {
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-        );
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
     }
 }
