@@ -128,8 +128,17 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setLoadsImagesAutomatically(true);
-        settings.setLoadWithOverviewMode(false);
+
+        // Signage pages may be designed at a larger fixed canvas than the panel.
+        // Overview mode scales the whole document down to the available WebView width
+        // instead of cropping the right/bottom edges on 1280x1024 Android panels.
         settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setSupportZoom(true);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        webView.setInitialScale(0);
+
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
