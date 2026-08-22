@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'ir.hbintellisys.player'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'ir.hbintellisys.player'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+
+        buildConfigField 'String', 'DEFAULT_DISPLAY_URL', '"http://100.98.243.107:8094/"'
+        buildConfigField 'String', 'DEFAULT_SITE_CODE', '"setareh"'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
