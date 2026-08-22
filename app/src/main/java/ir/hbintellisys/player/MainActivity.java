@@ -7,6 +7,7 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -19,6 +20,7 @@ import android.webkit.WebViewClient;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,6 +32,12 @@ public class MainActivity extends Activity {
     private static final String KEY_SITE = "site_code";
     private static final long HEALTH_INTERVAL_MS = 15_000L;
     private static final long RETRY_DELAY_MS = 10_000L;
+
+    // The Setareh/AFTAB dashboard is visually much cleaner when rendered on a
+    // slightly wider virtual canvas and then fitted to the physical 5:4 panel.
+    // This prevents the three dashboard columns from becoming cramped while
+    // still filling the complete 1280x1024 display without cropping.
+    private static final int SIGNAGE_VIRTUAL_WIDTH_CSS = 1440;
 
     private WebView webView;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -128,17 +136,12 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setLoadsImagesAutomatically(true);
-
-        // Signage pages may be designed at a larger fixed canvas than the panel.
-        // Overview mode scales the whole document down to the available WebView width
-        // instead of cropping the right/bottom edges on 1280x1024 Android panels.
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
-        settings.setSupportZoom(true);
+        settings.setSupportZoom(false);
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
-        webView.setInitialScale(0);
-
+        settings.setTextZoom(100);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
@@ -155,6 +158,7 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
                     offline = false;
+                    applySignageViewport(view);
                 }
                 applyImmersiveMode();
             }
@@ -169,6 +173,42 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private void applySignageViewport(WebView view) {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        float density = dm.density <= 0f ? 1f : dm.density;
+        float cssDeviceWidth = dm.widthPixels / density;
+        float scale = cssDeviceWidth / SIGNAGE_VIRTUAL_WIDTH_CSS;
+
+        // Keep a sane bound in case an unusual OEM reports bad metrics.
+        scale = Math.max(0.45f, Math.min(1.0f, scale));
+        final float finalScale = scale;
+
+        String js = String.format(Locale.US,
+                "(function(){" +
+                "var m=document.querySelector('meta[name=viewport]');" +
+                "if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}" +
+                "m.setAttribute('content','width=%d, initial-scale=%.4f, minimum-scale=%.4f, maximum-scale=%.4f, user-scalable=no');" +
+                "document.documentElement.style.minWidth='%dpx';" +
+                "document.documentElement.style.width='%dpx';" +
+                "document.documentElement.style.overflowX='hidden';" +
+                "document.body.style.minWidth='%dpx';" +
+                "document.body.style.width='%dpx';" +
+                "document.body.style.margin='0';" +
+                "void(document.body.offsetWidth);" +
+                "return {w:window.innerWidth,dw:document.documentElement.scrollWidth,scale:%.4f};" +
+                "})()",
+                SIGNAGE_VIRTUAL_WIDTH_CSS,
+                finalScale, finalScale, finalScale,
+                SIGNAGE_VIRTUAL_WIDTH_CSS,
+                SIGNAGE_VIRTUAL_WIDTH_CSS,
+                SIGNAGE_VIRTUAL_WIDTH_CSS,
+                SIGNAGE_VIRTUAL_WIDTH_CSS,
+                finalScale);
+
+        view.evaluateJavascript(js, result ->
+                Log.i(TAG, "Signage viewport applied: " + result));
     }
 
     private void showOfflinePage() {
