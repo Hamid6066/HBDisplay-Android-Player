@@ -16,6 +16,7 @@ public class BootReceiver extends BroadcastReceiver {
         Log.i(TAG, "Received: " + action);
 
         requestTailscaleConnect(context);
+        WatchdogReceiver.schedule(context);
 
         Intent player = new Intent(context, MainActivity.class);
         player.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
