@@ -7,6 +7,7 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
@@ -19,6 +20,7 @@ import android.webkit.WebViewClient;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,6 +32,12 @@ public class MainActivity extends Activity {
     private static final String KEY_SITE = "site_code";
     private static final long HEALTH_INTERVAL_MS = 15_000L;
     private static final long RETRY_DELAY_MS = 10_000L;
+
+    // Signage pages were designed against a 160-dpi CSS coordinate system.
+    // OEM Android boxes can boot at 240 dpi, which makes a 1280px panel expose
+    // only ~853 CSS px and clips the dashboard.  We emulate the proven 160-dpi
+    // viewport inside WebView instead of modifying the Android system density.
+    private static final int SIGNAGE_BASE_DPI = 160;
 
     private WebView webView;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -82,9 +90,6 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onStop() {
-        // If somebody presses Home/Back, opens Settings, or another application
-        // takes over the display, a wake-up alarm remains armed and restores the
-        // signage activity within roughly one minute.
         WatchdogReceiver.schedule(this);
         super.onStop();
     }
@@ -136,7 +141,10 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
 
-        webView.setInitialScale(100);
+        int scalePercent = getSignageScalePercent();
+        webView.setInitialScale(scalePercent);
+        Log.i(TAG, "WebView initial scale=" + scalePercent + "%");
+
         webView.setWebViewClient(new WebViewClient() {
             @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
@@ -145,7 +153,10 @@ public class MainActivity extends Activity {
 
             @Override public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) offline = false;
+                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    offline = false;
+                    applySignageViewport(view);
+                }
                 applyImmersiveMode();
             }
 
@@ -158,6 +169,37 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    private int getSignageScalePercent() {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int densityDpi = dm.densityDpi > 0 ? dm.densityDpi : SIGNAGE_BASE_DPI;
+        int percent = Math.round((SIGNAGE_BASE_DPI * 100f) / densityDpi);
+        return Math.max(50, Math.min(100, percent));
+    }
+
+    private void applySignageViewport(WebView view) {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int densityDpi = dm.densityDpi > 0 ? dm.densityDpi : SIGNAGE_BASE_DPI;
+        float scale = Math.min(1f, (float) SIGNAGE_BASE_DPI / (float) densityDpi);
+        int physicalWidth = dm.widthPixels > 0 ? dm.widthPixels : 1280;
+
+        // Force the page to use the panel's physical width as its CSS design
+        // viewport, then compensate only for Android's device density.  On this
+        // ZC-H133 at 1280x1024/240dpi this becomes width=1280, scale=0.6667,
+        // exactly matching the layout that was proven correct at wm density 160.
+        String js = String.format(Locale.US,
+                "(function(){" +
+                "var m=document.querySelector('meta[name=viewport]');" +
+                "if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}" +
+                "m.setAttribute('content','width=%d, initial-scale=%.4f, minimum-scale=%.4f, maximum-scale=%.4f, user-scalable=no');" +
+                "document.documentElement.style.overflowX='hidden';" +
+                "document.body.style.margin='0';" +
+                "return {innerWidth:window.innerWidth,scrollWidth:document.documentElement.scrollWidth,scale:%.4f};" +
+                "})()",
+                physicalWidth, scale, scale, scale, scale);
+
+        view.evaluateJavascript(js, result -> Log.i(TAG, "Viewport=" + result));
     }
 
     private void showOfflinePage() {
