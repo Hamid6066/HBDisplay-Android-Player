@@ -54,6 +54,7 @@ public class MainActivity extends Activity {
         applyImmersiveMode();
         loadConfiguration(getIntent());
         BootReceiver.requestTailscaleConnect(this);
+        WatchdogReceiver.schedule(this);
         createWebView();
         webView.loadUrl(displayUrl);
         handler.postDelayed(healthLoop, 5_000L);
@@ -66,6 +67,7 @@ public class MainActivity extends Activity {
         String oldUrl = displayUrl;
         loadConfiguration(intent);
         BootReceiver.requestTailscaleConnect(this);
+        WatchdogReceiver.schedule(this);
         if (webView != null && !displayUrl.equals(oldUrl)) {
             offline = false;
             webView.loadUrl(displayUrl);
@@ -76,6 +78,15 @@ public class MainActivity extends Activity {
         super.onResume();
         applyImmersiveMode();
         BootReceiver.requestTailscaleConnect(this);
+        WatchdogReceiver.schedule(this);
+    }
+
+    @Override protected void onStop() {
+        // If somebody presses Home/Back, opens Settings, or another application
+        // takes over the display, a wake-up alarm remains armed and restores the
+        // signage activity within roughly one minute.
+        WatchdogReceiver.schedule(this);
+        super.onStop();
     }
 
     @Override protected void onDestroy() {
@@ -115,10 +126,6 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setLoadsImagesAutomatically(true);
-
-        // Let the dashboard use the WebView's real CSS viewport.  Do not inject a
-        // fake 1440px document width: on this 1280x1024 / 160dpi installation the
-        // WebView viewport is already the correct 1280 CSS pixels wide.
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(false);
         settings.setSupportZoom(false);
