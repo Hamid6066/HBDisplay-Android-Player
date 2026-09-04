@@ -285,7 +285,8 @@ public class MainActivity extends Activity {
 
     private void writeCache(String value, byte[] body, String mime, String encoding) {
         try {
-            String key = sha256(value);
+            String canonical = canonicalCacheUrl(value);
+            String key = sha256(canonical);
             File bodyTmp = new File(offlineCacheDir, key + ".body.tmp");
             File metaTmp = new File(offlineCacheDir, key + ".meta.tmp");
             File bodyFile = new File(offlineCacheDir, key + ".body");
@@ -297,6 +298,7 @@ public class MainActivity extends Activity {
             }
             Properties props = new Properties();
             props.setProperty("url", value);
+            props.setProperty("canonical_url", canonical);
             props.setProperty("mime", mime == null ? "application/octet-stream" : mime);
             props.setProperty("encoding", encoding == null ? "UTF-8" : encoding);
             props.setProperty("saved_at", Long.toString(System.currentTimeMillis()));
@@ -309,7 +311,7 @@ public class MainActivity extends Activity {
             if (metaFile.exists() && !metaFile.delete()) Log.w(TAG, "Could not replace cached metadata");
             if (!bodyTmp.renameTo(bodyFile)) throw new Exception("body rename failed");
             if (!metaTmp.renameTo(metaFile)) throw new Exception("meta rename failed");
-            Log.d(TAG, "Cached " + value + " bytes=" + body.length);
+            Log.d(TAG, "Cached " + value + " as " + canonical + " bytes=" + body.length);
         } catch (Exception e) {
             Log.w(TAG, "Cache write failed for " + value + ": " + e.getMessage());
         }
@@ -317,7 +319,8 @@ public class MainActivity extends Activity {
 
     private WebResourceResponse readCache(String value) {
         try {
-            String key = sha256(value);
+            String canonical = canonicalCacheUrl(value);
+            String key = sha256(canonical);
             File bodyFile = new File(offlineCacheDir, key + ".body");
             File metaFile = new File(offlineCacheDir, key + ".meta");
             if (!bodyFile.isFile() || !metaFile.isFile()) return null;
@@ -327,7 +330,7 @@ public class MainActivity extends Activity {
             }
             String mime = props.getProperty("mime", guessMime(value));
             String encoding = props.getProperty("encoding", "UTF-8");
-            Log.i(TAG, "OFFLINE CACHE HIT: " + value);
+            Log.i(TAG, "OFFLINE CACHE HIT: " + value + " via " + canonical);
             return new WebResourceResponse(mime, encoding, new FileInputStream(bodyFile));
         } catch (Exception e) {
             Log.w(TAG, "Cache read failed for " + value + ": " + e.getMessage());
@@ -337,10 +340,41 @@ public class MainActivity extends Activity {
 
     private boolean hasCachedUrl(String value) {
         try {
-            String key = sha256(value);
+            String key = sha256(canonicalCacheUrl(value));
             return new File(offlineCacheDir, key + ".body").isFile() && new File(offlineCacheDir, key + ".meta").isFile();
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    private String canonicalCacheUrl(String value) {
+        if (value == null) return "";
+        try {
+            URL url = new URL(value);
+            String query = url.getQuery();
+            if (query == null || query.isEmpty()) return value;
+
+            StringBuilder kept = new StringBuilder();
+            for (String part : query.split("&")) {
+                if (part == null || part.isEmpty()) continue;
+                int eq = part.indexOf('=');
+                String name = eq >= 0 ? part.substring(0, eq) : part;
+                // HBDisplay uses ?_=timestamp purely as a cache-buster. It must
+                // not create a different persistent cache entry on every refresh.
+                if ("_".equals(name)) continue;
+                if (kept.length() > 0) kept.append('&');
+                kept.append(part);
+            }
+
+            StringBuilder out = new StringBuilder();
+            out.append(url.getProtocol()).append("://").append(url.getAuthority());
+            String path = url.getPath();
+            if (path != null && !path.isEmpty()) out.append(path);
+            else out.append('/');
+            if (kept.length() > 0) out.append('?').append(kept);
+            return out.toString();
+        } catch (Exception e) {
+            return value;
         }
     }
 
