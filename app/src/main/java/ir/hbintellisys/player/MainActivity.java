@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,6 +27,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -45,6 +47,8 @@ public class MainActivity extends Activity {
     private static final long RETRY_DELAY_MS = 10_000L;
     private static final int CONNECT_TIMEOUT_MS = 4_000;
     private static final int READ_TIMEOUT_MS = 8_000;
+    private static final long SCREENSHOT_INTERVAL_MS = 300_000L;
+    private static final int SCREENSHOT_JPEG_QUALITY = 82;
 
     // Signage pages were designed against a 160-dpi CSS coordinate system.
     private static final int SIGNAGE_BASE_DPI = 160;
@@ -53,6 +57,8 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean probeRunning = new AtomicBoolean(false);
+    private final AtomicBoolean screenshotRunning = new AtomicBoolean(false);
+    private long lastScreenshotAttemptMs = 0L;
     private boolean offline = false;
     private boolean pageShown = false;
     private String displayUrl;
@@ -463,12 +469,110 @@ public class MainActivity extends Activity {
                         pageShown = false;
                         webView.loadUrl(displayUrl);
                     }
+                    maybeCaptureAndUploadScreenshot();
                 } else {
                     BootReceiver.requestTailscaleConnect(this);
                     if (!pageShown && !hasCachedUrl(displayUrl)) showOfflinePage();
                 }
             });
         });
+    }
+
+    private void maybeCaptureAndUploadScreenshot() {
+        if (webView == null || !pageShown || offline || screenshotRunning.get()) return;
+
+        long now = System.currentTimeMillis();
+        if (now - lastScreenshotAttemptMs < SCREENSHOT_INTERVAL_MS) return;
+        lastScreenshotAttemptMs = now;
+
+        if (!screenshotRunning.compareAndSet(false, true)) return;
+
+        webView.post(() -> {
+            try {
+                if (isFinishing() || isDestroyed() || webView == null || offline || !pageShown) {
+                    screenshotRunning.set(false);
+                    return;
+                }
+
+                int width = webView.getWidth();
+                int height = webView.getHeight();
+                if (width <= 0 || height <= 0) {
+                    Log.w(TAG, "Live screenshot skipped: WebView size=" + width + "x" + height);
+                    screenshotRunning.set(false);
+                    return;
+                }
+
+                Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                Canvas canvas = new Canvas(bitmap);
+                webView.draw(canvas);
+
+                ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
+                boolean compressed = bitmap.compress(Bitmap.CompressFormat.JPEG, SCREENSHOT_JPEG_QUALITY, jpeg);
+                bitmap.recycle();
+
+                if (!compressed) {
+                    Log.w(TAG, "Live screenshot JPEG compression failed");
+                    screenshotRunning.set(false);
+                    return;
+                }
+
+                byte[] payload = jpeg.toByteArray();
+                executor.execute(() -> uploadLiveScreenshot(payload));
+            } catch (Exception e) {
+                screenshotRunning.set(false);
+                Log.w(TAG, "Live screenshot capture failed: " + e.getMessage());
+            }
+        });
+    }
+
+    private void uploadLiveScreenshot(byte[] jpeg) {
+        HttpURLConnection connection = null;
+        try {
+            URL base = new URL(displayUrl);
+            URL endpoint = new URL(base.getProtocol() + "://" + base.getAuthority() + "/api/live/screenshot");
+
+            String boundary = "----HBDisplay" + System.currentTimeMillis();
+            String head =
+                    "--" + boundary + "\r\n" +
+                    "Content-Disposition: form-data; name=\"site_code\"\r\n\r\n" +
+                    siteCode + "\r\n" +
+                    "--" + boundary + "\r\n" +
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"aftab-live.jpg\"\r\n" +
+                    "Content-Type: image/jpeg\r\n\r\n";
+            String tail = "\r\n--" + boundary + "--\r\n";
+
+            byte[] headBytes = head.getBytes(StandardCharsets.UTF_8);
+            byte[] tailBytes = tail.getBytes(StandardCharsets.UTF_8);
+
+            connection = (HttpURLConnection) endpoint.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setDoOutput(true);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.3 site/" + siteCode);
+            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+            connection.setFixedLengthStreamingMode(headBytes.length + jpeg.length + tailBytes.length);
+
+            try (OutputStream out = connection.getOutputStream()) {
+                out.write(headBytes);
+                out.write(jpeg);
+                out.write(tailBytes);
+                out.flush();
+            }
+
+            int status = connection.getResponseCode();
+            if (status >= 200 && status < 300) {
+                Log.i(TAG, "Live screenshot uploaded status=" + status + " bytes=" + jpeg.length);
+            } else {
+                Log.w(TAG, "Live screenshot upload HTTP " + status);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Live screenshot upload failed: " + e.getMessage());
+        } finally {
+            if (connection != null) connection.disconnect();
+            screenshotRunning.set(false);
+        }
     }
 
     private void applyImmersiveMode() {
