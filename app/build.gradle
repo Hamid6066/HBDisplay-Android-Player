@@ -10,8 +10,8 @@ android {
         applicationId 'ir.hbintellisys.player'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 2
+        versionName '0.2.0'
 
         buildConfigField 'String', 'DEFAULT_DISPLAY_URL', '"http://100.98.243.107:8094/"'
         buildConfigField 'String', 'DEFAULT_SITE_CODE', '"setareh"'
