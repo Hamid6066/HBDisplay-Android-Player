@@ -30,6 +30,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
@@ -49,8 +50,6 @@ public class MainActivity extends Activity {
     private static final int READ_TIMEOUT_MS = 8_000;
     private static final long SCREENSHOT_INTERVAL_MS = 300_000L;
     private static final int SCREENSHOT_JPEG_QUALITY = 82;
-
-    // Signage pages were designed against a 160-dpi CSS coordinate system.
     private static final int SIGNAGE_BASE_DPI = 160;
 
     private WebView webView;
@@ -63,6 +62,7 @@ public class MainActivity extends Activity {
     private boolean pageShown = false;
     private String displayUrl;
     private String siteCode;
+    private String monitorId;
     private File offlineCacheDir;
 
     private final Runnable healthLoop = new Runnable() {
@@ -79,10 +79,10 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         applyImmersiveMode();
         loadConfiguration(getIntent());
+        monitorId = resolveMonitorId();
+        Log.i(TAG, "Monitor identity=" + monitorId);
         offlineCacheDir = new File(getFilesDir(), "offline_cache");
-        if (!offlineCacheDir.exists() && !offlineCacheDir.mkdirs()) {
-            Log.w(TAG, "Could not create offline cache directory");
-        }
+        if (!offlineCacheDir.exists() && !offlineCacheDir.mkdirs()) Log.w(TAG, "Could not create offline cache directory");
         BootReceiver.requestTailscaleConnect(this);
         WatchdogReceiver.schedule(this);
         createWebView();
@@ -143,11 +143,33 @@ public class MainActivity extends Activity {
         Log.i(TAG, "Configuration site=" + siteCode + " url=" + displayUrl);
     }
 
+    private String resolveMonitorId() {
+        try (FileInputStream in = new FileInputStream("/proc/sys/kernel/hostname")) {
+            String value = new String(readFully(in), StandardCharsets.UTF_8).trim();
+            value = sanitizeMonitorId(value);
+            if (!value.isEmpty() && !"localhost".equals(value)) return value;
+        } catch (Exception e) {
+            Log.w(TAG, "Could not read device hostname: " + e.getMessage());
+        }
+        String fallback = sanitizeMonitorId(android.os.Build.MODEL);
+        return fallback.isEmpty() ? "hbdisplay-monitor" : fallback;
+    }
+
+    private String sanitizeMonitorId(String value) {
+        if (value == null) return "";
+        String v = value.trim().toLowerCase(Locale.US);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < v.length() && out.length() < 80; i++) {
+            char c = v.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') out.append(c);
+        }
+        return out.toString();
+    }
+
     private void createWebView() {
         webView = new WebView(this);
         webView.setBackgroundColor(0xFF000000);
         setContentView(webView);
-
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -163,27 +185,22 @@ public class MainActivity extends Activity {
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
-
         int scalePercent = getSignageScalePercent();
         webView.setInitialScale(scalePercent);
         Log.i(TAG, "WebView initial scale=" + scalePercent + "%");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                if (request == null || request.getUrl() == null || !"GET".equalsIgnoreCase(request.getMethod())) {
-                    return super.shouldInterceptRequest(view, request);
-                }
+                if (request == null || request.getUrl() == null || !"GET".equalsIgnoreCase(request.getMethod())) return super.shouldInterceptRequest(view, request);
                 String url = request.getUrl().toString();
                 if (!isCacheableUrl(url)) return super.shouldInterceptRequest(view, request);
                 WebResourceResponse response = fetchOrReadCached(url);
                 return response != null ? response : super.shouldInterceptRequest(view, request);
             }
-
             @Override public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 Log.i(TAG, "Loading: " + url);
             }
-
             @Override public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
@@ -192,7 +209,6 @@ public class MainActivity extends Activity {
                 }
                 applyImmersiveMode();
             }
-
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (request != null && request.isForMainFrame()) {
@@ -210,9 +226,7 @@ public class MainActivity extends Activity {
             URL base = new URL(displayUrl);
             URL target = new URL(value);
             return base.getHost().equalsIgnoreCase(target.getHost()) && effectivePort(base) == effectivePort(target);
-        } catch (Exception e) {
-            return false;
-        }
+        } catch (Exception e) { return false; }
     }
 
     private int effectivePort(URL url) {
@@ -229,28 +243,24 @@ public class MainActivity extends Activity {
             connection.setReadTimeout(READ_TIMEOUT_MS);
             connection.setInstanceFollowRedirects(true);
             connection.setUseCaches(false);
-            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.2 site/" + siteCode);
+            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.4 site/" + siteCode + " monitor/" + monitorId);
             connection.setRequestProperty("Accept-Encoding", "identity");
             int status = connection.getResponseCode();
             if (status >= 200 && status < 300) {
                 byte[] body = readFully(connection.getInputStream());
-                String contentType = connection.getContentType();
-                CacheMeta meta = parseContentType(contentType, value);
+                CacheMeta meta = parseContentType(connection.getContentType(), value);
                 writeCache(value, body, meta.mime, meta.encoding);
                 return new WebResourceResponse(meta.mime, meta.encoding, new ByteArrayInputStream(body));
             }
             Log.w(TAG, "HTTP " + status + " for " + value + "; trying offline cache");
         } catch (Exception e) {
             Log.d(TAG, "Network miss for " + value + ": " + e.getMessage());
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
+        } finally { if (connection != null) connection.disconnect(); }
         return readCache(value);
     }
 
     private byte[] readFully(InputStream input) throws Exception {
-        try (BufferedInputStream in = new BufferedInputStream(input);
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+        try (BufferedInputStream in = new BufferedInputStream(input); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[16 * 1024];
             int n;
             while ((n = in.read(buffer)) >= 0) out.write(buffer, 0, n);
@@ -297,30 +307,20 @@ public class MainActivity extends Activity {
             File metaTmp = new File(offlineCacheDir, key + ".meta.tmp");
             File bodyFile = new File(offlineCacheDir, key + ".body");
             File metaFile = new File(offlineCacheDir, key + ".meta");
-
-            try (FileOutputStream out = new FileOutputStream(bodyTmp)) {
-                out.write(body);
-                out.getFD().sync();
-            }
+            try (FileOutputStream out = new FileOutputStream(bodyTmp)) { out.write(body); out.getFD().sync(); }
             Properties props = new Properties();
             props.setProperty("url", value);
             props.setProperty("canonical_url", canonical);
             props.setProperty("mime", mime == null ? "application/octet-stream" : mime);
             props.setProperty("encoding", encoding == null ? "UTF-8" : encoding);
             props.setProperty("saved_at", Long.toString(System.currentTimeMillis()));
-            try (FileOutputStream out = new FileOutputStream(metaTmp)) {
-                props.store(out, "HBDisplay persistent offline cache");
-                out.getFD().sync();
-            }
-
+            try (FileOutputStream out = new FileOutputStream(metaTmp)) { props.store(out, "HBDisplay persistent offline cache"); out.getFD().sync(); }
             if (bodyFile.exists() && !bodyFile.delete()) Log.w(TAG, "Could not replace cached body");
             if (metaFile.exists() && !metaFile.delete()) Log.w(TAG, "Could not replace cached metadata");
             if (!bodyTmp.renameTo(bodyFile)) throw new Exception("body rename failed");
             if (!metaTmp.renameTo(metaFile)) throw new Exception("meta rename failed");
             Log.d(TAG, "Cached " + value + " as " + canonical + " bytes=" + body.length);
-        } catch (Exception e) {
-            Log.w(TAG, "Cache write failed for " + value + ": " + e.getMessage());
-        }
+        } catch (Exception e) { Log.w(TAG, "Cache write failed for " + value + ": " + e.getMessage()); }
     }
 
     private WebResourceResponse readCache(String value) {
@@ -331,9 +331,7 @@ public class MainActivity extends Activity {
             File metaFile = new File(offlineCacheDir, key + ".meta");
             if (!bodyFile.isFile() || !metaFile.isFile()) return null;
             Properties props = new Properties();
-            try (FileInputStream in = new FileInputStream(metaFile)) {
-                props.load(in);
-            }
+            try (FileInputStream in = new FileInputStream(metaFile)) { props.load(in); }
             String mime = props.getProperty("mime", guessMime(value));
             String encoding = props.getProperty("encoding", "UTF-8");
             Log.i(TAG, "OFFLINE CACHE HIT: " + value + " via " + canonical);
@@ -348,9 +346,7 @@ public class MainActivity extends Activity {
         try {
             String key = sha256(canonicalCacheUrl(value));
             return new File(offlineCacheDir, key + ".body").isFile() && new File(offlineCacheDir, key + ".meta").isFile();
-        } catch (Exception e) {
-            return false;
-        }
+        } catch (Exception e) { return false; }
     }
 
     private String canonicalCacheUrl(String value) {
@@ -359,29 +355,22 @@ public class MainActivity extends Activity {
             URL url = new URL(value);
             String query = url.getQuery();
             if (query == null || query.isEmpty()) return value;
-
             StringBuilder kept = new StringBuilder();
             for (String part : query.split("&")) {
                 if (part == null || part.isEmpty()) continue;
                 int eq = part.indexOf('=');
                 String name = eq >= 0 ? part.substring(0, eq) : part;
-                // HBDisplay uses ?_=timestamp purely as a cache-buster. It must
-                // not create a different persistent cache entry on every refresh.
                 if ("_".equals(name)) continue;
                 if (kept.length() > 0) kept.append('&');
                 kept.append(part);
             }
-
             StringBuilder out = new StringBuilder();
             out.append(url.getProtocol()).append("://").append(url.getAuthority());
             String path = url.getPath();
-            if (path != null && !path.isEmpty()) out.append(path);
-            else out.append('/');
+            if (path != null && !path.isEmpty()) out.append(path); else out.append('/');
             if (kept.length() > 0) out.append('?').append(kept);
             return out.toString();
-        } catch (Exception e) {
-            return value;
-        }
+        } catch (Exception e) { return value; }
     }
 
     private String sha256(String value) throws Exception {
@@ -404,7 +393,6 @@ public class MainActivity extends Activity {
         int densityDpi = dm.densityDpi > 0 ? dm.densityDpi : SIGNAGE_BASE_DPI;
         float scale = Math.min(1f, (float) SIGNAGE_BASE_DPI / (float) densityDpi);
         int physicalWidth = dm.widthPixels > 0 ? dm.widthPixels : 1280;
-
         String js = String.format(Locale.US,
                 "(function(){" +
                 "var m=document.querySelector('meta[name=viewport]');" +
@@ -413,9 +401,7 @@ public class MainActivity extends Activity {
                 "document.documentElement.style.overflowX='hidden';" +
                 "document.body.style.margin='0';" +
                 "return {innerWidth:window.innerWidth,scrollWidth:document.documentElement.scrollWidth,scale:%.4f};" +
-                "})()",
-                physicalWidth, scale, scale, scale, scale);
-
+                "})()", physicalWidth, scale, scale, scale, scale);
         view.evaluateJavascript(js, result -> Log.i(TAG, "Viewport=" + result));
     }
 
@@ -431,10 +417,7 @@ public class MainActivity extends Activity {
     }
 
     private void scheduleRetry() {
-        handler.postDelayed(() -> {
-            BootReceiver.requestTailscaleConnect(this);
-            probeServer();
-        }, RETRY_DELAY_MS);
+        handler.postDelayed(() -> { BootReceiver.requestTailscaleConnect(this); probeServer(); }, RETRY_DELAY_MS);
     }
 
     private void probeServer() {
@@ -450,16 +433,17 @@ public class MainActivity extends Activity {
                 connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
                 connection.setReadTimeout(5_000);
                 connection.setInstanceFollowRedirects(true);
-                connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.2 site/" + siteCode);
+                connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.4 site/" + siteCode + " monitor/" + monitorId);
                 int status = connection.getResponseCode();
                 reachable = status >= 200 && status < 500;
-                Log.d(TAG, "Heartbeat status=" + status + " site=" + siteCode);
+                Log.d(TAG, "Server probe status=" + status + " site=" + siteCode + " monitor=" + monitorId);
             } catch (Exception e) {
-                Log.w(TAG, "Heartbeat failed: " + e.getMessage());
+                Log.w(TAG, "Server probe failed: " + e.getMessage());
             } finally {
                 if (connection != null) connection.disconnect();
-                probeRunning.set(false);
             }
+            if (reachable) uploadHeartbeat();
+            probeRunning.set(false);
             final boolean serverReachable = reachable;
             handler.post(() -> {
                 if (isFinishing() || isDestroyed() || webView == null) return;
@@ -478,44 +462,50 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void uploadHeartbeat() {
+        HttpURLConnection connection = null;
+        try {
+            URL base = new URL(displayUrl);
+            URL endpoint = new URL(base.getProtocol() + "://" + base.getAuthority() + "/api/live/heartbeat");
+            String body = "site_code=" + URLEncoder.encode(siteCode, "UTF-8") + "&monitor_id=" + URLEncoder.encode(monitorId, "UTF-8");
+            byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+            connection = (HttpURLConnection) endpoint.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setDoOutput(true);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.4 site/" + siteCode + " monitor/" + monitorId);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            connection.setFixedLengthStreamingMode(payload.length);
+            try (OutputStream out = connection.getOutputStream()) { out.write(payload); out.flush(); }
+            int status = connection.getResponseCode();
+            if (status >= 200 && status < 300) Log.d(TAG, "Monitor heartbeat uploaded status=" + status + " monitor=" + monitorId);
+            else Log.d(TAG, "Monitor heartbeat endpoint HTTP " + status + " monitor=" + monitorId);
+        } catch (Exception e) {
+            Log.d(TAG, "Monitor heartbeat upload failed: " + e.getMessage());
+        } finally { if (connection != null) connection.disconnect(); }
+    }
+
     private void maybeCaptureAndUploadScreenshot() {
         if (webView == null || !pageShown || offline || screenshotRunning.get()) return;
-
         long now = System.currentTimeMillis();
         if (now - lastScreenshotAttemptMs < SCREENSHOT_INTERVAL_MS) return;
         lastScreenshotAttemptMs = now;
-
         if (!screenshotRunning.compareAndSet(false, true)) return;
-
         webView.post(() -> {
             try {
-                if (isFinishing() || isDestroyed() || webView == null || offline || !pageShown) {
-                    screenshotRunning.set(false);
-                    return;
-                }
-
+                if (isFinishing() || isDestroyed() || webView == null || offline || !pageShown) { screenshotRunning.set(false); return; }
                 int width = webView.getWidth();
                 int height = webView.getHeight();
-                if (width <= 0 || height <= 0) {
-                    Log.w(TAG, "Live screenshot skipped: WebView size=" + width + "x" + height);
-                    screenshotRunning.set(false);
-                    return;
-                }
-
+                if (width <= 0 || height <= 0) { Log.w(TAG, "Live screenshot skipped: WebView size=" + width + "x" + height); screenshotRunning.set(false); return; }
                 Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 Canvas canvas = new Canvas(bitmap);
                 webView.draw(canvas);
-
                 ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
                 boolean compressed = bitmap.compress(Bitmap.CompressFormat.JPEG, SCREENSHOT_JPEG_QUALITY, jpeg);
                 bitmap.recycle();
-
-                if (!compressed) {
-                    Log.w(TAG, "Live screenshot JPEG compression failed");
-                    screenshotRunning.set(false);
-                    return;
-                }
-
+                if (!compressed) { Log.w(TAG, "Live screenshot JPEG compression failed"); screenshotRunning.set(false); return; }
                 byte[] payload = jpeg.toByteArray();
                 executor.execute(() -> uploadLiveScreenshot(payload));
             } catch (Exception e) {
@@ -530,43 +520,31 @@ public class MainActivity extends Activity {
         try {
             URL base = new URL(displayUrl);
             URL endpoint = new URL(base.getProtocol() + "://" + base.getAuthority() + "/api/live/screenshot");
-
             String boundary = "----HBDisplay" + System.currentTimeMillis();
             String head =
                     "--" + boundary + "\r\n" +
-                    "Content-Disposition: form-data; name=\"site_code\"\r\n\r\n" +
-                    siteCode + "\r\n" +
+                    "Content-Disposition: form-data; name=\"site_code\"\r\n\r\n" + siteCode + "\r\n" +
                     "--" + boundary + "\r\n" +
-                    "Content-Disposition: form-data; name=\"file\"; filename=\"aftab-live.jpg\"\r\n" +
+                    "Content-Disposition: form-data; name=\"monitor_id\"\r\n\r\n" + monitorId + "\r\n" +
+                    "--" + boundary + "\r\n" +
+                    "Content-Disposition: form-data; name=\"file\"; filename=\"" + monitorId + "-live.jpg\"\r\n" +
                     "Content-Type: image/jpeg\r\n\r\n";
             String tail = "\r\n--" + boundary + "--\r\n";
-
             byte[] headBytes = head.getBytes(StandardCharsets.UTF_8);
             byte[] tailBytes = tail.getBytes(StandardCharsets.UTF_8);
-
             connection = (HttpURLConnection) endpoint.openConnection();
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);
             connection.setDoOutput(true);
             connection.setUseCaches(false);
-            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.3 site/" + siteCode);
+            connection.setRequestProperty("User-Agent", "HBDisplay-Player/0.4 site/" + siteCode + " monitor/" + monitorId);
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
             connection.setFixedLengthStreamingMode(headBytes.length + jpeg.length + tailBytes.length);
-
-            try (OutputStream out = connection.getOutputStream()) {
-                out.write(headBytes);
-                out.write(jpeg);
-                out.write(tailBytes);
-                out.flush();
-            }
-
+            try (OutputStream out = connection.getOutputStream()) { out.write(headBytes); out.write(jpeg); out.write(tailBytes); out.flush(); }
             int status = connection.getResponseCode();
-            if (status >= 200 && status < 300) {
-                Log.i(TAG, "Live screenshot uploaded status=" + status + " bytes=" + jpeg.length);
-            } else {
-                Log.w(TAG, "Live screenshot upload HTTP " + status);
-            }
+            if (status >= 200 && status < 300) Log.i(TAG, "Live screenshot uploaded status=" + status + " monitor=" + monitorId + " bytes=" + jpeg.length);
+            else Log.w(TAG, "Live screenshot upload HTTP " + status + " monitor=" + monitorId);
         } catch (Exception e) {
             Log.w(TAG, "Live screenshot upload failed: " + e.getMessage());
         } finally {
@@ -588,9 +566,6 @@ public class MainActivity extends Activity {
     private static class CacheMeta {
         final String mime;
         final String encoding;
-        CacheMeta(String mime, String encoding) {
-            this.mime = mime;
-            this.encoding = encoding;
-        }
+        CacheMeta(String mime, String encoding) { this.mime = mime; this.encoding = encoding; }
     }
 }
