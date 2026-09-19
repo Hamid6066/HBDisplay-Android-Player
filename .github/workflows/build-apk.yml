@@ -37,13 +37,32 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build debug APK
-        run: gradle --no-daemon clean assembleDebug --stacktrace
+      - name: Restore permanent signing keystore
+        env:
+          HBDISPLAY_KEYSTORE_BASE64: ${{ secrets.HBDISPLAY_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$HBDISPLAY_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/hbdisplay-release.jks"
+          test -s "$RUNNER_TEMP/hbdisplay-release.jks"
 
-      - name: Upload APK artifact
+      - name: Build signed release APK
+        env:
+          HBDISPLAY_KEYSTORE_FILE: ${{ runner.temp }}/hbdisplay-release.jks
+          HBDISPLAY_KEYSTORE_PASSWORD: ${{ secrets.HBDISPLAY_KEYSTORE_PASSWORD }}
+          HBDISPLAY_KEY_ALIAS: ${{ secrets.HBDISPLAY_KEY_ALIAS }}
+          HBDISPLAY_KEY_PASSWORD: ${{ secrets.HBDISPLAY_KEY_PASSWORD }}
+        run: gradle --no-daemon clean assembleRelease --stacktrace
+
+      - name: Verify release signing certificate
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+          CERT_SHA=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr '[:lower:]' '[:upper:]')
+          echo "HBDisplay release certificate SHA-256: $CERT_SHA"
+          test "$CERT_SHA" = "902F0A4CAB95EC6CF02AF83B58E2ECD8844D3C473A4DFCDEB93B92C4DECEC646"
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HBDisplay-Player-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: HBDisplay-Player-release
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
