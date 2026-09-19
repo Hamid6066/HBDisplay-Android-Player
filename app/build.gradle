@@ -17,6 +17,15 @@ android {
         buildConfigField 'String', 'DEFAULT_SITE_CODE', '"setareh"'
     }
 
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('HBDISPLAY_KEYSTORE_FILE') ?: 'hbdisplay-release.jks')
+            storePassword System.getenv('HBDISPLAY_KEYSTORE_PASSWORD')
+            keyAlias System.getenv('HBDISPLAY_KEY_ALIAS')
+            keyPassword System.getenv('HBDISPLAY_KEY_PASSWORD')
+        }
+    }
+
     buildFeatures {
         buildConfig true
     }
@@ -24,6 +33,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
