@@ -75,7 +75,9 @@ public class MainActivity extends Activity {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private long lastReconnectRequestMs = 0L;
+    private long lastUpdateCheckAttemptMs = 0L;
     private static final long RECONNECT_THROTTLE_MS = 30_000L;
+    private static final long UPDATE_CHECK_INTERVAL_MS = 900_000L;
 
     private final Runnable healthLoop = new Runnable() {
         @Override public void run() { probeServer(); handler.postDelayed(this, HEALTH_INTERVAL_MS); }
@@ -198,7 +200,56 @@ public class MainActivity extends Activity {
     private void showOfflinePage(){if(offline||webView==null||pageShown||hasCachedUrl(displayUrl))return;offline=true;String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;font-family:sans-serif;}.c{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;}h1{font-size:38px;margin:0 0 12px}p{font-size:20px;opacity:.7}</style></head><body><div class='c'><h1>HBDisplay</h1><p>Connecting to server...</p></div></body></html>";webView.loadDataWithBaseURL(null,html,"text/html","UTF-8",null);}
     private void scheduleRetry(){handler.postDelayed(()->{requestTailscaleRecovery();probeServer();},RETRY_DELAY_MS);}
 
-    private void probeServer(){if(!probeRunning.compareAndSet(false,true))return;final String urlToProbe=displayUrl;executor.execute(()->{boolean reachable=false;HttpURLConnection connection=null;try{URL url=new URL(urlToProbe);connection=(HttpURLConnection)url.openConnection();connection.setRequestMethod("GET");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(5_000);connection.setInstanceFollowRedirects(true);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);int status=connection.getResponseCode();reachable=status>=200&&status<500;Log.d(TAG,"Server probe status="+status+" site="+siteCode+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Server probe failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}if(reachable)uploadHeartbeat();probeRunning.set(false);final boolean serverReachable=reachable;handler.post(()->{if(isFinishing()||isDestroyed()||webView==null)return;if(serverReachable){if(offline){offline=false;pageShown=false;webView.loadUrl(displayUrl);}maybeCaptureAndUploadScreenshot();}else{requestTailscaleRecovery();if(!pageShown&&!hasCachedUrl(displayUrl))showOfflinePage();}});});}
+    private void probeServer(){if(!probeRunning.compareAndSet(false,true))return;final String urlToProbe=displayUrl;executor.execute(()->{boolean reachable=false;HttpURLConnection connection=null;try{URL url=new URL(urlToProbe);connection=(HttpURLConnection)url.openConnection();connection.setRequestMethod("GET");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(5_000);connection.setInstanceFollowRedirects(true);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);int status=connection.getResponseCode();reachable=status>=200&&status<500;Log.d(TAG,"Server probe status="+status+" site="+siteCode+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Server probe failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}if(reachable){uploadHeartbeat();checkApprovedUpdateReadOnly();}probeRunning.set(false);final boolean serverReachable=reachable;handler.post(()->{if(isFinishing()||isDestroyed()||webView==null)return;if(serverReachable){if(offline){offline=false;pageShown=false;webView.loadUrl(displayUrl);}maybeCaptureAndUploadScreenshot();}else{requestTailscaleRecovery();if(!pageShown&&!hasCachedUrl(displayUrl))showOfflinePage();}});});}
+
+
+    // Read-only OTA discovery. No download or installation is permitted in this stage.
+    // The server must authenticate the device and return only approved releases.
+    private void checkApprovedUpdateReadOnly(){
+        if(deviceKey==null||deviceKey.isEmpty())return;
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(lastUpdateCheckAttemptMs!=0L&&now-lastUpdateCheckAttemptMs<UPDATE_CHECK_INTERVAL_MS)return;
+        lastUpdateCheckAttemptMs=now;
+        HttpURLConnection connection=null;
+        try{
+            URL base=new URL(displayUrl);
+            // OTA metadata and APKs must use HTTPS, even if the legacy display uses HTTP.
+            if(!"https".equalsIgnoreCase(base.getProtocol()))return;
+            String query="site_code="+URLEncoder.encode(siteCode,"UTF-8")
+                +"&monitor_id="+URLEncoder.encode(monitorId,"UTF-8")
+                +"&version_code="+BuildConfig.VERSION_CODE;
+            URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/player-updates/check?"+query);
+            connection=(HttpURLConnection)endpoint.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestProperty(DEVICE_KEY_HEADER,deviceKey);
+            int status=connection.getResponseCode();
+            if(status==200){
+                try(InputStream in=connection.getInputStream()){
+                    byte[] bytes=readFully(in);
+                    if(bytes.length>16384)throw new IllegalStateException("OTA response too large");
+                    org.json.JSONObject response=new org.json.JSONObject(new String(bytes,StandardCharsets.UTF_8));
+                    String state=response.optString("status","");
+                    if("up_to_date".equals(state)){
+                        Log.d(TAG,"OTA check: up to date");
+                    }else if("update_available".equals(state)){
+                        int target=response.optInt("version_code",-1);
+                        if(target>BuildConfig.VERSION_CODE&&"approved".equals(response.optString("rollout",""))){
+                            Log.i(TAG,"OTA approved update available (check-only); target code="+target);
+                        }else{
+                            Log.w(TAG,"OTA metadata rejected: invalid target version or rollout");
+                        }
+                    }else Log.w(TAG,"OTA check: unknown response state");
+                }
+            }else if(status==404||status==501){
+                Log.d(TAG,"OTA endpoint not available yet; existing playback unchanged");
+            }else Log.w(TAG,"OTA check HTTP "+status);
+        }catch(Exception e){Log.d(TAG,"OTA check unavailable: "+e.getClass().getSimpleName());}
+        finally{if(connection!=null)connection.disconnect();}
+    }
 
     private void uploadHeartbeat(){HttpURLConnection connection=null;try{URL base=new URL(displayUrl);URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/live/heartbeat");String body="site_code="+URLEncoder.encode(siteCode,"UTF-8")+"&monitor_id="+URLEncoder.encode(monitorId,"UTF-8")+"&player_version="+URLEncoder.encode(BuildConfig.VERSION_NAME,"UTF-8");byte[] payload=body.getBytes(StandardCharsets.UTF_8);connection=(HttpURLConnection)endpoint.openConnection();connection.setRequestMethod("POST");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(READ_TIMEOUT_MS);connection.setDoOutput(true);connection.setUseCaches(false);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);connection.setRequestProperty("Content-Type","application/x-www-form-urlencoded; charset=UTF-8");if(deviceKey!=null&&!deviceKey.isEmpty())connection.setRequestProperty(DEVICE_KEY_HEADER,deviceKey);connection.setFixedLengthStreamingMode(payload.length);try(OutputStream out=connection.getOutputStream()){out.write(payload);out.flush();}int status=connection.getResponseCode();if(status>=200&&status<300)Log.d(TAG,"Monitor heartbeat uploaded status="+status+" monitor="+monitorId);else Log.d(TAG,"Monitor heartbeat endpoint HTTP "+status+" monitor="+monitorId);}catch(Exception e){Log.d(TAG,"Monitor heartbeat upload failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}}
 
