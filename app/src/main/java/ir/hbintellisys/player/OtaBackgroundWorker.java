@@ -25,12 +25,6 @@ final class OtaBackgroundWorker {
     });
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    Future<?> stageApprovedRelease(final URL source, final File privateOtaDir,
-                                    final String releaseId, final String sha256,
-                                    final Callback callback) {
-        return stageApprovedRelease(source, privateOtaDir, releaseId, sha256, -1L, callback);
-    }
-
     Future<?> stageApprovedRelease(final OtaReleaseContract.Approved approved,
                                     final File privateOtaDir, final Callback callback) {
         if (approved == null) throw new IllegalArgumentException("approved release required");
