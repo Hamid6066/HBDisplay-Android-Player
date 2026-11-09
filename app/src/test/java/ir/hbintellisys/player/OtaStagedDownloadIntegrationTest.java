@@ -99,4 +99,25 @@ public class OtaStagedDownloadIntegrationTest {
         assertFalse(new File(d,"release8.apk").exists());
         assertFalse(new File(d,"release8.part").exists());
     }
+    @Test public void approvedSizeMismatchRejectedBeforeStreaming() throws Exception {
+        byte[] full = "abcdefghij".getBytes("UTF-8");
+        FakeServer server = new FakeServer(); File d = dir();
+        server.responses.add(new Response(200, full, full.length, "\"v1\"", null));
+        try {
+            OtaStagedDownloader.stage(server.url(), d, "release8", sha(full), full.length + 1L);
+            fail("Expected approved size mismatch");
+        } catch (IOException expected) {
+            assertTrue(expected.getMessage().contains("content length"));
+        }
+        assertFalse(new File(d, "release8.apk").exists());
+    }
+
+    @Test public void approvedSizeAcceptedWhenExact() throws Exception {
+        byte[] full = "abcdefghij".getBytes("UTF-8");
+        FakeServer server = new FakeServer(); File d = dir();
+        server.responses.add(new Response(200, full, full.length, "\"v1\"", null));
+        File apk = OtaStagedDownloader.stage(server.url(), d, "release8", sha(full), full.length);
+        assertArrayEquals(full, Files.readAllBytes(apk.toPath()));
+    }
+
 }
