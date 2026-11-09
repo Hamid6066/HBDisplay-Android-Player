@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -17,6 +18,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.HBDisplayPlayer"
         android:usesCleartextTraffic="true">
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.ota-files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ota_file_paths" />
+        </provider>
 
         <activity
             android:name=".MainActivity"
