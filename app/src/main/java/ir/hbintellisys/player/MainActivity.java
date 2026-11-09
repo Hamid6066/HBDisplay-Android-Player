@@ -62,6 +62,8 @@ public class MainActivity extends Activity {
     private WebView webView;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    // Isolated OTA staging; never scheduled automatically in the development build.
+    private final OtaBackgroundWorker otaWorker = new OtaBackgroundWorker();
     private final AtomicBoolean probeRunning = new AtomicBoolean(false);
     private final AtomicBoolean screenshotRunning = new AtomicBoolean(false);
     private long lastScreenshotAttemptMs = 0L;
@@ -114,7 +116,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() { super.onResume(); applyImmersiveMode(); requestTailscaleRecovery(); WatchdogReceiver.schedule(this); }
     @Override protected void onStop() { WatchdogReceiver.schedule(this); super.onStop(); }
-    @Override protected void onDestroy() { if(connectivityManager!=null&&networkCallback!=null){try{connectivityManager.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}} handler.removeCallbacksAndMessages(null); executor.shutdownNow(); if(webView!=null){webView.stopLoading();webView.destroy();} super.onDestroy(); }
+    @Override protected void onDestroy() { if(connectivityManager!=null&&networkCallback!=null){try{connectivityManager.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}} handler.removeCallbacksAndMessages(null); executor.shutdownNow(); otaWorker.shutdown(); if(webView!=null){webView.stopLoading();webView.destroy();} super.onDestroy(); }
 
     private void requestTailscaleRecovery(){long now=android.os.SystemClock.elapsedRealtime();if(now-lastReconnectRequestMs<RECONNECT_THROTTLE_MS)return;lastReconnectRequestMs=now;BootReceiver.requestTailscaleConnect(this);}
 
