@@ -3,6 +3,10 @@ package ir.hbintellisys.player;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.os.Bundle;
@@ -45,6 +49,8 @@ public class MainActivity extends Activity {
     private static final String KEY_URL = "display_url";
     private static final String KEY_SITE = "site_code";
     private static final String KEY_MONITOR = "monitor_id";
+    private static final String KEY_DEVICE_KEY = "device_key";
+    private static final String DEVICE_KEY_HEADER = "X-HBDisplay-Device-Key";
     private static final long HEALTH_INTERVAL_MS = 15_000L;
     private static final long RETRY_DELAY_MS = 10_000L;
     private static final int CONNECT_TIMEOUT_MS = 4_000;
@@ -56,6 +62,8 @@ public class MainActivity extends Activity {
     private WebView webView;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    // Isolated OTA staging; never scheduled automatically in the development build.
+    private final OtaBackgroundWorker otaWorker = new OtaBackgroundWorker();
     private final AtomicBoolean probeRunning = new AtomicBoolean(false);
     private final AtomicBoolean screenshotRunning = new AtomicBoolean(false);
     private long lastScreenshotAttemptMs = 0L;
@@ -64,7 +72,14 @@ public class MainActivity extends Activity {
     private String displayUrl;
     private String siteCode;
     private String monitorId;
+    private String deviceKey;
     private File offlineCacheDir;
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private long lastReconnectRequestMs = 0L;
+    private long lastUpdateCheckAttemptMs = 0L;
+    private static final long RECONNECT_THROTTLE_MS = 30_000L;
+    private static final long UPDATE_CHECK_INTERVAL_MS = 900_000L;
 
     private final Runnable healthLoop = new Runnable() {
         @Override public void run() { probeServer(); handler.postDelayed(this, HEALTH_INTERVAL_MS); }
@@ -80,8 +95,9 @@ public class MainActivity extends Activity {
         Log.i(TAG, "Monitor identity=" + monitorId);
         offlineCacheDir = new File(getFilesDir(), "offline_cache");
         if (!offlineCacheDir.exists() && !offlineCacheDir.mkdirs()) Log.w(TAG, "Could not create offline cache directory");
-        BootReceiver.requestTailscaleConnect(this);
+        requestTailscaleRecovery();
         WatchdogReceiver.schedule(this);
+        registerConnectivityCallback();
         createWebView();
         webView.loadUrl(displayUrl);
         handler.postDelayed(healthLoop, 5_000L);
@@ -93,31 +109,46 @@ public class MainActivity extends Activity {
         String oldUrl = displayUrl;
         loadConfiguration(intent);
         monitorId = resolveMonitorId();
-        BootReceiver.requestTailscaleConnect(this);
+        requestTailscaleRecovery();
         WatchdogReceiver.schedule(this);
         if (webView != null && !displayUrl.equals(oldUrl)) { offline=false; pageShown=false; webView.loadUrl(displayUrl); }
     }
 
-    @Override protected void onResume() { super.onResume(); applyImmersiveMode(); BootReceiver.requestTailscaleConnect(this); WatchdogReceiver.schedule(this); }
+    @Override protected void onResume() { super.onResume(); applyImmersiveMode(); requestTailscaleRecovery(); WatchdogReceiver.schedule(this); }
     @Override protected void onStop() { WatchdogReceiver.schedule(this); super.onStop(); }
-    @Override protected void onDestroy() { handler.removeCallbacksAndMessages(null); executor.shutdownNow(); if(webView!=null){webView.stopLoading();webView.destroy();} super.onDestroy(); }
+    @Override protected void onDestroy() { if(connectivityManager!=null&&networkCallback!=null){try{connectivityManager.unregisterNetworkCallback(networkCallback);}catch(Exception ignored){}} handler.removeCallbacksAndMessages(null); executor.shutdownNow(); otaWorker.shutdown(); if(webView!=null){webView.stopLoading();webView.destroy();} super.onDestroy(); }
+
+    private void requestTailscaleRecovery(){long now=android.os.SystemClock.elapsedRealtime();if(now-lastReconnectRequestMs<RECONNECT_THROTTLE_MS)return;lastReconnectRequestMs=now;BootReceiver.requestTailscaleConnect(this);}
+
+    private void registerConnectivityCallback(){
+        connectivityManager=(ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
+        if(connectivityManager==null)return;
+        networkCallback=new ConnectivityManager.NetworkCallback(){
+            @Override public void onAvailable(Network network){handler.post(()->{if(!isFinishing()&&!isDestroyed()){Log.i(TAG,"Network available: checking server immediately");probeServer();}});}
+            @Override public void onLost(Network network){handler.post(()->{if(!isFinishing()&&!isDestroyed())requestTailscaleRecovery();});}
+        };
+        try{connectivityManager.registerDefaultNetworkCallback(networkCallback);}catch(Exception e){Log.w(TAG,"Network callback unavailable: "+e.getMessage());networkCallback=null;}
+    }
 
     private void loadConfiguration(Intent intent) {
         SharedPreferences prefs=getSharedPreferences(PREFS,MODE_PRIVATE);
         String savedUrl=prefs.getString(KEY_URL,BuildConfig.DEFAULT_DISPLAY_URL);
         String savedSite=prefs.getString(KEY_SITE,BuildConfig.DEFAULT_SITE_CODE);
         String savedMonitor=prefs.getString(KEY_MONITOR,"");
+        String savedDeviceKey=prefs.getString(KEY_DEVICE_KEY,"");
         if(intent!=null){
             String suppliedUrl=intent.getStringExtra(KEY_URL);
             String suppliedSite=intent.getStringExtra(KEY_SITE);
             String suppliedMonitor=intent.getStringExtra(KEY_MONITOR);
+            String suppliedDeviceKey=intent.getStringExtra(KEY_DEVICE_KEY);
+            if(suppliedDeviceKey!=null && suppliedDeviceKey.matches("[A-Za-z0-9_-]{32,128}")) savedDeviceKey=suppliedDeviceKey;
             if(suppliedUrl!=null&&(suppliedUrl.startsWith("http://")||suppliedUrl.startsWith("https://"))) savedUrl=suppliedUrl.trim();
             if(suppliedSite!=null&&!suppliedSite.trim().isEmpty()) savedSite=suppliedSite.trim();
             String clean=sanitizeMonitorId(suppliedMonitor);
             if(!clean.isEmpty()&&!"localhost".equals(clean)) savedMonitor=clean;
         }
-        displayUrl=savedUrl; siteCode=savedSite;
-        prefs.edit().putString(KEY_URL,displayUrl).putString(KEY_SITE,siteCode).putString(KEY_MONITOR,savedMonitor).apply();
+        displayUrl=savedUrl; siteCode=savedSite; deviceKey=savedDeviceKey;
+        prefs.edit().putString(KEY_URL,displayUrl).putString(KEY_SITE,siteCode).putString(KEY_MONITOR,savedMonitor).putString(KEY_DEVICE_KEY,deviceKey).apply();
         Log.i(TAG,"Configuration site="+siteCode+" url="+displayUrl+" monitor="+savedMonitor);
     }
 
@@ -169,15 +200,78 @@ public class MainActivity extends Activity {
 
     private void applySignageViewport(WebView view){DisplayMetrics dm=getResources().getDisplayMetrics();int densityDpi=dm.densityDpi>0?dm.densityDpi:SIGNAGE_BASE_DPI;float scale=Math.min(1f,(float)SIGNAGE_BASE_DPI/(float)densityDpi);int physicalWidth=dm.widthPixels>0?dm.widthPixels:1280;String js=String.format(Locale.US,"(function(){var m=document.querySelector('meta[name=viewport]');if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}m.setAttribute('content','width=%d, initial-scale=%.4f, minimum-scale=%.4f, maximum-scale=%.4f, user-scalable=no');document.documentElement.style.overflowX='hidden';document.body.style.margin='0';return {innerWidth:window.innerWidth,scrollWidth:document.documentElement.scrollWidth,scale:%.4f};})()",physicalWidth,scale,scale,scale,scale);view.evaluateJavascript(js,result->Log.i(TAG,"Viewport="+result));}
     private void showOfflinePage(){if(offline||webView==null||pageShown||hasCachedUrl(displayUrl))return;offline=true;String html="<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><style>html,body{margin:0;width:100%;height:100%;background:#000;color:#fff;font-family:sans-serif;}.c{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;}h1{font-size:38px;margin:0 0 12px}p{font-size:20px;opacity:.7}</style></head><body><div class='c'><h1>HBDisplay</h1><p>Connecting to server...</p></div></body></html>";webView.loadDataWithBaseURL(null,html,"text/html","UTF-8",null);}
-    private void scheduleRetry(){handler.postDelayed(()->{BootReceiver.requestTailscaleConnect(this);probeServer();},RETRY_DELAY_MS);}
+    private void scheduleRetry(){handler.postDelayed(()->{requestTailscaleRecovery();probeServer();},RETRY_DELAY_MS);}
 
-    private void probeServer(){if(!probeRunning.compareAndSet(false,true))return;final String urlToProbe=displayUrl;executor.execute(()->{boolean reachable=false;HttpURLConnection connection=null;try{URL url=new URL(urlToProbe);connection=(HttpURLConnection)url.openConnection();connection.setRequestMethod("GET");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(5_000);connection.setInstanceFollowRedirects(true);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);int status=connection.getResponseCode();reachable=status>=200&&status<500;Log.d(TAG,"Server probe status="+status+" site="+siteCode+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Server probe failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}if(reachable)uploadHeartbeat();probeRunning.set(false);final boolean serverReachable=reachable;handler.post(()->{if(isFinishing()||isDestroyed()||webView==null)return;if(serverReachable){if(offline){offline=false;pageShown=false;webView.loadUrl(displayUrl);}maybeCaptureAndUploadScreenshot();}else{BootReceiver.requestTailscaleConnect(this);if(!pageShown&&!hasCachedUrl(displayUrl))showOfflinePage();}});});}
+    private void probeServer(){if(!probeRunning.compareAndSet(false,true))return;final String urlToProbe=displayUrl;executor.execute(()->{boolean reachable=false;HttpURLConnection connection=null;try{URL url=new URL(urlToProbe);connection=(HttpURLConnection)url.openConnection();connection.setRequestMethod("GET");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(5_000);connection.setInstanceFollowRedirects(true);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);int status=connection.getResponseCode();reachable=status>=200&&status<500;Log.d(TAG,"Server probe status="+status+" site="+siteCode+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Server probe failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}if(reachable){uploadHeartbeat();checkApprovedUpdateReadOnly();}probeRunning.set(false);final boolean serverReachable=reachable;handler.post(()->{if(isFinishing()||isDestroyed()||webView==null)return;if(serverReachable){if(offline){offline=false;pageShown=false;webView.loadUrl(displayUrl);}maybeCaptureAndUploadScreenshot();}else{requestTailscaleRecovery();if(!pageShown&&!hasCachedUrl(displayUrl))showOfflinePage();}});});}
 
-    private void uploadHeartbeat(){HttpURLConnection connection=null;try{URL base=new URL(displayUrl);URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/live/heartbeat");String body="site_code="+URLEncoder.encode(siteCode,"UTF-8")+"&monitor_id="+URLEncoder.encode(monitorId,"UTF-8");byte[] payload=body.getBytes(StandardCharsets.UTF_8);connection=(HttpURLConnection)endpoint.openConnection();connection.setRequestMethod("POST");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(READ_TIMEOUT_MS);connection.setDoOutput(true);connection.setUseCaches(false);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);connection.setRequestProperty("Content-Type","application/x-www-form-urlencoded; charset=UTF-8");connection.setFixedLengthStreamingMode(payload.length);try(OutputStream out=connection.getOutputStream()){out.write(payload);out.flush();}int status=connection.getResponseCode();if(status>=200&&status<300)Log.d(TAG,"Monitor heartbeat uploaded status="+status+" monitor="+monitorId);else Log.d(TAG,"Monitor heartbeat endpoint HTTP "+status+" monitor="+monitorId);}catch(Exception e){Log.d(TAG,"Monitor heartbeat upload failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}}
+
+    // Read-only OTA discovery. No download or installation is permitted in this stage.
+    // The server must authenticate the device and return only approved releases.
+    private void checkApprovedUpdateReadOnly(){
+        if(deviceKey==null||deviceKey.isEmpty())return;
+        long now=android.os.SystemClock.elapsedRealtime();
+        if(lastUpdateCheckAttemptMs!=0L&&now-lastUpdateCheckAttemptMs<UPDATE_CHECK_INTERVAL_MS)return;
+        lastUpdateCheckAttemptMs=now;
+        HttpURLConnection connection=null;
+        try{
+            URL base=new URL(displayUrl);
+            // OTA metadata and APKs must use HTTPS, even if the legacy display uses HTTP.
+            if(!"https".equalsIgnoreCase(base.getProtocol()))return;
+            String query="site_code="+URLEncoder.encode(siteCode,"UTF-8")
+                +"&monitor_id="+URLEncoder.encode(monitorId,"UTF-8")
+                +"&version_code="+BuildConfig.VERSION_CODE;
+            URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/player-updates/check?"+query);
+            connection=(HttpURLConnection)endpoint.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestProperty(DEVICE_KEY_HEADER,deviceKey);
+            int status=connection.getResponseCode();
+            if(status==200){
+                try(InputStream in=connection.getInputStream()){
+                    ByteArrayOutputStream limited = new ByteArrayOutputStream();
+                    byte[] chunk = new byte[4096];
+                    int count;
+                    while ((count = in.read(chunk)) != -1) {
+                        if (limited.size() + count > 16384)
+                            throw new IllegalStateException("OTA response too large");
+                        limited.write(chunk, 0, count);
+                    }
+                    byte[] bytes = limited.toByteArray();
+                    org.json.JSONObject response=new org.json.JSONObject(new String(bytes,StandardCharsets.UTF_8));
+                    String state=response.optString("status","");
+                    if("up_to_date".equals(state)){
+                        Log.d(TAG,"OTA check: up to date");
+                    }else if("update_available".equals(state)){
+                        try {
+                            OtaReleaseContract.Approved approved = OtaReleaseContract.validate(
+                                state, response.optString("rollout",""),
+                                BuildConfig.VERSION_CODE, response.optInt("version_code",-1),
+                                response.optString("release_id",""),
+                                response.optString("apk_url",""),
+                                response.optString("sha256",""),
+                                response.optLong("size_bytes",-1L));
+                            Log.i(TAG,"OTA metadata validated (check-only); target code="+approved.versionCode);
+                            // Deliberately do NOT schedule staging or installation here.
+                        } catch (IllegalArgumentException invalid) {
+                            Log.w(TAG,"OTA metadata rejected: "+invalid.getMessage());
+                        }
+                    }else Log.w(TAG,"OTA check: unknown response state");
+                }
+            }else if(status==404||status==501){
+                Log.d(TAG,"OTA endpoint not available yet; existing playback unchanged");
+            }else Log.w(TAG,"OTA check HTTP "+status);
+        }catch(Exception e){Log.d(TAG,"OTA check unavailable: "+e.getClass().getSimpleName());}
+        finally{if(connection!=null)connection.disconnect();}
+    }
+
+    private void uploadHeartbeat(){HttpURLConnection connection=null;try{URL base=new URL(displayUrl);URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/live/heartbeat");String body="site_code="+URLEncoder.encode(siteCode,"UTF-8")+"&monitor_id="+URLEncoder.encode(monitorId,"UTF-8")+"&player_version="+URLEncoder.encode(BuildConfig.VERSION_NAME,"UTF-8");byte[] payload=body.getBytes(StandardCharsets.UTF_8);connection=(HttpURLConnection)endpoint.openConnection();connection.setRequestMethod("POST");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(READ_TIMEOUT_MS);connection.setDoOutput(true);connection.setUseCaches(false);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);connection.setRequestProperty("Content-Type","application/x-www-form-urlencoded; charset=UTF-8");if(deviceKey!=null&&!deviceKey.isEmpty())connection.setRequestProperty(DEVICE_KEY_HEADER,deviceKey);connection.setFixedLengthStreamingMode(payload.length);try(OutputStream out=connection.getOutputStream()){out.write(payload);out.flush();}int status=connection.getResponseCode();if(status>=200&&status<300)Log.d(TAG,"Monitor heartbeat uploaded status="+status+" monitor="+monitorId);else Log.d(TAG,"Monitor heartbeat endpoint HTTP "+status+" monitor="+monitorId);}catch(Exception e){Log.d(TAG,"Monitor heartbeat upload failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();}}
 
     private void maybeCaptureAndUploadScreenshot(){if(webView==null||!pageShown||offline||screenshotRunning.get())return;long now=System.currentTimeMillis();if(now-lastScreenshotAttemptMs<SCREENSHOT_INTERVAL_MS)return;lastScreenshotAttemptMs=now;if(!screenshotRunning.compareAndSet(false,true))return;webView.post(()->{try{if(isFinishing()||isDestroyed()||webView==null||offline||!pageShown){screenshotRunning.set(false);return;}int width=webView.getWidth();int height=webView.getHeight();if(width<=0||height<=0){Log.w(TAG,"Live screenshot skipped: WebView size="+width+"x"+height);screenshotRunning.set(false);return;}Bitmap bitmap=Bitmap.createBitmap(width,height,Bitmap.Config.ARGB_8888);Canvas canvas=new Canvas(bitmap);webView.draw(canvas);ByteArrayOutputStream jpeg=new ByteArrayOutputStream();boolean compressed=bitmap.compress(Bitmap.CompressFormat.JPEG,SCREENSHOT_JPEG_QUALITY,jpeg);bitmap.recycle();if(!compressed){Log.w(TAG,"Live screenshot JPEG compression failed");screenshotRunning.set(false);return;}byte[] payload=jpeg.toByteArray();executor.execute(()->uploadLiveScreenshot(payload));}catch(Exception e){screenshotRunning.set(false);Log.w(TAG,"Live screenshot capture failed: "+e.getMessage());}});}
 
-    private void uploadLiveScreenshot(byte[] jpeg){HttpURLConnection connection=null;try{URL base=new URL(displayUrl);URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/live/screenshot");String boundary="----HBDisplay"+System.currentTimeMillis();String head="--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"site_code\"\r\n\r\n"+siteCode+"\r\n"+"--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"monitor_id\"\r\n\r\n"+monitorId+"\r\n"+"--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"file\"; filename=\""+monitorId+"-live.jpg\"\r\n"+"Content-Type: image/jpeg\r\n\r\n";String tail="\r\n--"+boundary+"--\r\n";byte[] headBytes=head.getBytes(StandardCharsets.UTF_8);byte[] tailBytes=tail.getBytes(StandardCharsets.UTF_8);connection=(HttpURLConnection)endpoint.openConnection();connection.setRequestMethod("POST");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(READ_TIMEOUT_MS);connection.setDoOutput(true);connection.setUseCaches(false);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);connection.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);connection.setFixedLengthStreamingMode(headBytes.length+jpeg.length+tailBytes.length);try(OutputStream out=connection.getOutputStream()){out.write(headBytes);out.write(jpeg);out.write(tailBytes);out.flush();}int status=connection.getResponseCode();if(status>=200&&status<300)Log.i(TAG,"Live screenshot uploaded status="+status+" monitor="+monitorId+" bytes="+jpeg.length);else Log.w(TAG,"Live screenshot upload HTTP "+status+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Live screenshot upload failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();screenshotRunning.set(false);}}
+    private void uploadLiveScreenshot(byte[] jpeg){HttpURLConnection connection=null;try{URL base=new URL(displayUrl);URL endpoint=new URL(base.getProtocol()+"://"+base.getAuthority()+"/api/live/screenshot");String boundary="----HBDisplay"+System.currentTimeMillis();String head="--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"site_code\"\r\n\r\n"+siteCode+"\r\n"+"--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"monitor_id\"\r\n\r\n"+monitorId+"\r\n"+"--"+boundary+"\r\n"+"Content-Disposition: form-data; name=\"file\"; filename=\""+monitorId+"-live.jpg\"\r\n"+"Content-Type: image/jpeg\r\n\r\n";String tail="\r\n--"+boundary+"--\r\n";byte[] headBytes=head.getBytes(StandardCharsets.UTF_8);byte[] tailBytes=tail.getBytes(StandardCharsets.UTF_8);connection=(HttpURLConnection)endpoint.openConnection();connection.setRequestMethod("POST");connection.setConnectTimeout(CONNECT_TIMEOUT_MS);connection.setReadTimeout(READ_TIMEOUT_MS);connection.setDoOutput(true);connection.setUseCaches(false);connection.setRequestProperty("User-Agent","HBDisplay-Player/0.5 site/"+siteCode+" monitor/"+monitorId);connection.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);if(deviceKey!=null&&!deviceKey.isEmpty())connection.setRequestProperty(DEVICE_KEY_HEADER,deviceKey);connection.setFixedLengthStreamingMode(headBytes.length+jpeg.length+tailBytes.length);try(OutputStream out=connection.getOutputStream()){out.write(headBytes);out.write(jpeg);out.write(tailBytes);out.flush();}int status=connection.getResponseCode();if(status>=200&&status<300)Log.i(TAG,"Live screenshot uploaded status="+status+" monitor="+monitorId+" bytes="+jpeg.length);else Log.w(TAG,"Live screenshot upload HTTP "+status+" monitor="+monitorId);}catch(Exception e){Log.w(TAG,"Live screenshot upload failed: "+e.getMessage());}finally{if(connection!=null)connection.disconnect();screenshotRunning.set(false);}}
 
     private void applyImmersiveMode(){getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY|View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_LAYOUT_STABLE);}
     private static class CacheMeta{final String mime;final String encoding;CacheMeta(String mime,String encoding){this.mime=mime;this.encoding=encoding;}}

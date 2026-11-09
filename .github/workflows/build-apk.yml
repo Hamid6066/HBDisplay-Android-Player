@@ -2,7 +2,7 @@ name: Build HBDisplay APK
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feature/device-key-auth-v0-7", "feature/ota-v0-8-offline-safe" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -44,6 +44,9 @@ jobs:
           printf '%s' "$HBDISPLAY_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/hbdisplay-release.jks"
           test -s "$RUNNER_TEMP/hbdisplay-release.jks"
 
+      - name: Run JVM unit tests
+        run: gradle --no-daemon :app:testDebugUnitTest --stacktrace
+
       - name: Build signed release APK
         env:
           HBDISPLAY_KEYSTORE_FILE: ${{ runner.temp }}/hbdisplay-release.jks
@@ -62,7 +65,7 @@ jobs:
       - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HBDisplay-Player-release
+          name: HBDisplay-Player-0.8.0-development-signed
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
