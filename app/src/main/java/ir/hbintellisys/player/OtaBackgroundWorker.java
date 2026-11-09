@@ -1,5 +1,6 @@
 package ir.hbintellisys.player;
 
+import android.content.Context;
 import java.io.File;
 import java.net.URL;
 import java.util.concurrent.ExecutorService;
@@ -25,16 +26,20 @@ final class OtaBackgroundWorker {
     });
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    Future<?> stageApprovedRelease(final OtaReleaseContract.Approved approved,
+    Future<?> stageApprovedRelease(final Context context,
+                                    final OtaReleaseContract.Approved approved,
                                     final File privateOtaDir, final Callback callback) {
+        if (context == null) throw new IllegalArgumentException("context required");
         if (approved == null) throw new IllegalArgumentException("approved release required");
-        return stageApprovedRelease(approved.apkUrl, privateOtaDir, approved.releaseId,
-                approved.sha256, approved.sizeBytes, callback);
+        return stageApprovedRelease(context.getApplicationContext(), approved.apkUrl,
+                privateOtaDir, approved.releaseId, approved.sha256,
+                approved.sizeBytes, approved.versionCode, callback);
     }
 
-    private Future<?> stageApprovedRelease(final URL source, final File privateOtaDir,
-                                    final String releaseId, final String sha256,
-                                    final long sizeBytes, final Callback callback) {
+    private Future<?> stageApprovedRelease(final Context context, final URL source,
+                                    final File privateOtaDir, final String releaseId,
+                                    final String sha256, final long sizeBytes,
+                                    final int expectedVersionCode, final Callback callback) {
         if (callback == null) throw new IllegalArgumentException("callback required");
         if (!running.compareAndSet(false, true))
             throw new IllegalStateException("OTA staging already running");
@@ -43,6 +48,7 @@ final class OtaBackgroundWorker {
                 try {
                     if (Thread.currentThread().isInterrupted()) return;
                     File apk = OtaStagedDownloader.stage(source, privateOtaDir, releaseId, sha256, sizeBytes);
+                    OtaApkIdentityVerifier.verify(context, apk, expectedVersionCode);
                     if (!Thread.currentThread().isInterrupted()) callback.onStaged(apk);
                 } catch (Exception e) {
                     if (!Thread.currentThread().isInterrupted()) callback.onFailure(e);
