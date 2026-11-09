@@ -74,6 +74,10 @@
         </receiver>
 
         <receiver
+            android:name=".OtaInstallResultReceiver"
+            android:exported="false" />
+
+        <receiver
             android:name=".WatchdogReceiver"
             android:enabled="true"
             android:exported="false" />
