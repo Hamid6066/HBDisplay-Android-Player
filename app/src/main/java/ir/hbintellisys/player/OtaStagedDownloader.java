@@ -32,8 +32,10 @@ final class OtaStagedDownloader {
 
     static File stage(URL source, File privateOtaDir, String releaseId,
                       String expectedSha256, long expectedSizeBytes) throws Exception {
-        if (!"https".equalsIgnoreCase(source.getProtocol()) || source.getUserInfo() != null)
-            throw new IOException("HTTPS required");
+        if (!"https".equalsIgnoreCase(source.getProtocol()) || source.getUserInfo() != null
+                || source.getRef() != null || source.getHost() == null
+                || source.getHost().isEmpty())
+            throw new IOException("Safe HTTPS URL required");
         if (!releaseId.matches("[A-Za-z0-9_-]{1,80}"))
             throw new IOException("Invalid release ID");
         if (!expectedSha256.matches("[a-fA-F0-9]{64}"))
@@ -141,9 +143,14 @@ final class OtaStagedDownloader {
     }
 
     static boolean validStrongEtag(String value) {
-        return value != null && value.length() >= 2 && value.length() <= 200
-                && value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"'
-                && value.indexOf('\r') < 0 && value.indexOf('\n') < 0;
+        if (value == null || value.length() < 3 || value.length() > 200
+                || value.charAt(0) != '"' || value.charAt(value.length() - 1) != '"')
+            return false;
+        for (int i = 1; i < value.length() - 1; i++) {
+            char c = value.charAt(i);
+            if (c <= 0x20 || c == 0x7f || c == '"') return false;
+        }
+        return true;
     }
 
     static boolean validContentRange(String value, long start, long contentLength) {
