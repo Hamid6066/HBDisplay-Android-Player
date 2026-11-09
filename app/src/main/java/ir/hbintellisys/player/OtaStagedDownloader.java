@@ -74,8 +74,10 @@ final class OtaStagedDownloader {
             if (append) {
                 String contentRange = conn.getHeaderField("Content-Range");
                 if (!validContentRange(contentRange, existing, conn.getContentLengthLong())
-                        || !etag.equals(responseEtag))
-                    throw new IOException("Invalid resume Content-Range or ETag");
+                        || !etag.equals(responseEtag)) {
+                    resetPartial(part, etagFile);
+                    throw new IOException("Invalid resume Content-Range or ETag; partial reset");
+                }
             } else {
                 resetPartial(part, etagFile);
                 existing = 0;
