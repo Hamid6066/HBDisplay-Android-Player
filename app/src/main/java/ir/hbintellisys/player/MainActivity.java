@@ -231,8 +231,15 @@ public class MainActivity extends Activity {
             int status=connection.getResponseCode();
             if(status==200){
                 try(InputStream in=connection.getInputStream()){
-                    byte[] bytes=readFully(in);
-                    if(bytes.length>16384)throw new IllegalStateException("OTA response too large");
+                    ByteArrayOutputStream limited = new ByteArrayOutputStream();
+                    byte[] chunk = new byte[4096];
+                    int count;
+                    while ((count = in.read(chunk)) != -1) {
+                        if (limited.size() + count > 16384)
+                            throw new IllegalStateException("OTA response too large");
+                        limited.write(chunk, 0, count);
+                    }
+                    byte[] bytes = limited.toByteArray();
                     org.json.JSONObject response=new org.json.JSONObject(new String(bytes,StandardCharsets.UTF_8));
                     String state=response.optString("status","");
                     if("up_to_date".equals(state)){
