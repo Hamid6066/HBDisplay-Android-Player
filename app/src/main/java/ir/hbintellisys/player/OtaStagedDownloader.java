@@ -62,13 +62,18 @@ final class OtaStagedDownloader {
             }
             int status = conn.getResponseCode();
             boolean append = existing > 0 && status == 206;
+            if (status == 416 && existing > 0) {
+                // Stale range: clear partial; next check starts from byte zero.
+                resetPartial(part, etagFile);
+                throw new IOException("HTTP 416: stale partial reset; retry download");
+            }
             if (status != 200 && !append)
                 throw new IOException("Unexpected HTTP " + status);
 
             String responseEtag = conn.getHeaderField("ETag");
             if (append) {
                 String contentRange = conn.getHeaderField("Content-Range");
-                if (contentRange == null || !contentRange.startsWith("bytes " + existing + "-")
+                if (!validContentRange(contentRange, existing, conn.getContentLengthLong())
                         || !etag.equals(responseEtag))
                     throw new IOException("Invalid resume Content-Range or ETag");
             } else {
@@ -120,6 +125,28 @@ final class OtaStagedDownloader {
             return complete;
         } finally {
             conn.disconnect();
+        }
+    }
+
+    static boolean validStrongEtag(String value) {
+        return value != null && value.length() >= 2 && value.length() <= 200
+                && value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"'
+                && value.indexOf('\\r') < 0 && value.indexOf('\\n') < 0;
+    }
+
+    static boolean validContentRange(String value, long start, long contentLength) {
+        if (value == null || contentLength <= 0 || start < 0) return false;
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matcher(value);
+        if (!m.matches()) return false;
+        try {
+            long first = Long.parseLong(m.group(1));
+            long last = Long.parseLong(m.group(2));
+            long total = Long.parseLong(m.group(3));
+            return first == start && last >= first && total > last
+                    && last - first + 1 == contentLength && total <= MAX_APK_BYTES;
+        } catch (NumberFormatException e) {
+            return false;
         }
     }
 
