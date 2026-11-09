@@ -8,7 +8,7 @@ public class OtaStagedDownloaderTest {
         assertTrue(OtaStagedDownloader.validStrongEtag("\"release-v8\""));
         assertFalse(OtaStagedDownloader.validStrongEtag("W/\"release-v8\""));
         assertFalse(OtaStagedDownloader.validStrongEtag("release-v8"));
-        assertFalse(OtaStagedDownloader.validStrongEtag("\"bad\\r\\nheader\""));
+        assertFalse(OtaStagedDownloader.validStrongEtag("\"bad\r\nheader\""));
         assertFalse(OtaStagedDownloader.validStrongEtag(null));
     }
 
