@@ -12,8 +12,8 @@ public class OtaStagedDownloaderTest {
         assertFalse(OtaStagedDownloader.validStrongEtag(null));
         assertFalse(OtaStagedDownloader.validStrongEtag("\"\""));
         assertFalse(OtaStagedDownloader.validStrongEtag("\"has space\""));
-        assertFalse(OtaStagedDownloader.validStrongEtag("\"bad\\tvalue\""));
-        assertFalse(OtaStagedDownloader.validStrongEtag("\"inner\\\"quote\""));
+        assertFalse(OtaStagedDownloader.validStrongEtag("\"bad\tvalue\""));
+        assertFalse(OtaStagedDownloader.validStrongEtag("\"inner\"quote\""));
     }
 
     @Test public void exactContentRangeForResume() {
