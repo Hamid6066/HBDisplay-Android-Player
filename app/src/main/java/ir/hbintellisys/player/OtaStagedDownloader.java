@@ -131,7 +131,7 @@ final class OtaStagedDownloader {
     static boolean validStrongEtag(String value) {
         return value != null && value.length() >= 2 && value.length() <= 200
                 && value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"'
-                && value.indexOf('\\r') < 0 && value.indexOf('\\n') < 0;
+                && value.indexOf('\r') < 0 && value.indexOf('\n') < 0;
     }
 
     static boolean validContentRange(String value, long start, long contentLength) {
