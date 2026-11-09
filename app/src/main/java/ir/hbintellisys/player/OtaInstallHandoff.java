@@ -10,10 +10,14 @@ import java.io.File;
 final class OtaInstallHandoff {
     private OtaInstallHandoff() {}
 
-    static void requestUserInstall(Activity activity, File verifiedApk) {
+    static void requestUserInstall(Activity activity, File verifiedApk, int approvedVersionCode) throws Exception {
         if (activity == null || verifiedApk == null || !verifiedApk.isFile()
                 || !verifiedApk.getName().endsWith(".apk"))
             throw new IllegalArgumentException("Verified staged APK required");
+        File approvedDirectory = new File(activity.getFilesDir(), "ota").getCanonicalFile();
+        if (!approvedDirectory.equals(verifiedApk.getCanonicalFile().getParentFile()))
+            throw new SecurityException("APK outside private OTA directory");
+        OtaApkIdentityVerifier.verify(activity, verifiedApk, approvedVersionCode);
         Uri uri = FileProvider.getUriForFile(activity,
                 activity.getPackageName() + ".ota-files", verifiedApk);
         Intent intent = new Intent(Intent.ACTION_VIEW);
