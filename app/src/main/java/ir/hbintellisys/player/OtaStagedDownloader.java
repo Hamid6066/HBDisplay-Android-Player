@@ -27,19 +27,29 @@ final class OtaStagedDownloader {
 
     static File stage(URL source, File privateOtaDir, String releaseId, String expectedSha256)
             throws Exception {
+        return stage(source, privateOtaDir, releaseId, expectedSha256, -1L);
+    }
+
+    static File stage(URL source, File privateOtaDir, String releaseId,
+                      String expectedSha256, long expectedSizeBytes) throws Exception {
         if (!"https".equalsIgnoreCase(source.getProtocol()) || source.getUserInfo() != null)
             throw new IOException("HTTPS required");
         if (!releaseId.matches("[A-Za-z0-9_-]{1,80}"))
             throw new IOException("Invalid release ID");
         if (!expectedSha256.matches("[a-fA-F0-9]{64}"))
             throw new IOException("Invalid SHA256");
+        if (expectedSizeBytes != -1L
+                && (expectedSizeBytes <= 0 || expectedSizeBytes > MAX_APK_BYTES))
+            throw new IOException("Invalid approved APK size");
         if (!privateOtaDir.isDirectory() && !privateOtaDir.mkdirs())
             throw new IOException("Cannot create OTA staging directory");
 
         File part = new File(privateOtaDir, releaseId + ".part");
         File etagFile = new File(privateOtaDir, releaseId + ".etag");
         File complete = new File(privateOtaDir, releaseId + ".apk");
-        if (complete.isFile() && matchesSha256(complete, expectedSha256))
+        if (complete.isFile()
+                && (expectedSizeBytes == -1L || complete.length() == expectedSizeBytes)
+                && matchesSha256(complete, expectedSha256))
             return complete;
         if (complete.exists() && !complete.delete())
             throw new IOException("Cannot clear stale completed APK");
@@ -84,7 +94,8 @@ final class OtaStagedDownloader {
             }
 
             long declared = conn.getContentLengthLong();
-            if (declared < 0 || declared + existing > MAX_APK_BYTES)
+            if (declared < 0 || declared + existing > MAX_APK_BYTES
+                    || (expectedSizeBytes != -1L && declared + existing != expectedSizeBytes))
                 throw new IOException("Invalid APK content length");
             long free = privateOtaDir.getUsableSpace();
             if (free < declared + 10L * 1024 * 1024)
