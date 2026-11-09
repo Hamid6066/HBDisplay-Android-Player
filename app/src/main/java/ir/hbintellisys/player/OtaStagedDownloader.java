@@ -48,7 +48,7 @@ final class OtaStagedDownloader {
         String etag = etagFile.isFile() ? readSmallText(etagFile) : null;
         // A strong ETag is required to resume safely across elevator connectivity gaps.
         if (existing <= 0 || existing >= MAX_APK_BYTES || etag == null ||
-                !etag.startsWith("\"") || etag.startsWith("W/")) {
+                !validStrongEtag(etag)) {
             resetPartial(part, etagFile);
             existing = 0;
             etag = null;
@@ -91,8 +91,7 @@ final class OtaStagedDownloader {
                 throw new IOException("Insufficient storage");
 
             // Save validator before streaming, so interrupted downloads can resume.
-            if (responseEtag != null && responseEtag.startsWith("\"")
-                    && responseEtag.length() <= 200)
+            if (validStrongEtag(responseEtag))
                 writeSmallText(etagFile, responseEtag);
             else if (etagFile.exists() && !etagFile.delete())
                 throw new IOException("Cannot clear stale ETag");
