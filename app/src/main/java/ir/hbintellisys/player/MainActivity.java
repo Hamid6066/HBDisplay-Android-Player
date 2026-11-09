@@ -238,11 +238,18 @@ public class MainActivity extends Activity {
                     if("up_to_date".equals(state)){
                         Log.d(TAG,"OTA check: up to date");
                     }else if("update_available".equals(state)){
-                        int target=response.optInt("version_code",-1);
-                        if(target>BuildConfig.VERSION_CODE&&"approved".equals(response.optString("rollout",""))){
-                            Log.i(TAG,"OTA approved update available (check-only); target code="+target);
-                        }else{
-                            Log.w(TAG,"OTA metadata rejected: invalid target version or rollout");
+                        try {
+                            OtaReleaseContract.Approved approved = OtaReleaseContract.validate(
+                                state, response.optString("rollout",""),
+                                BuildConfig.VERSION_CODE, response.optInt("version_code",-1),
+                                response.optString("release_id",""),
+                                response.optString("apk_url",""),
+                                response.optString("sha256",""),
+                                response.optLong("size_bytes",-1L));
+                            Log.i(TAG,"OTA metadata validated (check-only); target code="+approved.versionCode);
+                            // Deliberately do NOT schedule staging or installation here.
+                        } catch (IllegalArgumentException invalid) {
+                            Log.w(TAG,"OTA metadata rejected: "+invalid.getMessage());
                         }
                     }else Log.w(TAG,"OTA check: unknown response state");
                 }
