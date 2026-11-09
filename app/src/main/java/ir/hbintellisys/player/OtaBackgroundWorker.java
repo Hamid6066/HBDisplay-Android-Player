@@ -48,7 +48,14 @@ final class OtaBackgroundWorker {
                 try {
                     if (Thread.currentThread().isInterrupted()) return;
                     File apk = OtaStagedDownloader.stage(source, privateOtaDir, releaseId, sha256, sizeBytes);
-                    OtaApkIdentityVerifier.verify(context, apk, expectedVersionCode);
+                    try {
+                        OtaApkIdentityVerifier.verify(context, apk, expectedVersionCode);
+                    } catch (Exception rejected) {
+                        // Never retain a hash-matching but untrusted package for reuse.
+                        if (apk.exists() && !apk.delete())
+                            rejected.addSuppressed(new java.io.IOException("Cannot remove rejected staged APK"));
+                        throw rejected;
+                    }
                     if (!Thread.currentThread().isInterrupted()) callback.onStaged(apk);
                 } catch (Exception e) {
                     if (!Thread.currentThread().isInterrupted()) callback.onFailure(e);
